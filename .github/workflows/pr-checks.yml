@@ -1,0 +1,55 @@
+name: pr-checks
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]   # "edited" re-checks after a title fix
+
+permissions: {}               # nothing by default; each job asks for what it needs
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Title must look like "type(scope): summary"'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}      # via env, never pasted into the script
+        run: |
+          re='^(feat|fix|docs|chore|refactor|test|ci)(\([a-z0-9-]+\))?!?: .{3,}$'
+          if [[ ! "$TITLE" =~ $re ]]; then
+            echo "::error::PR title must look like 'fix(api): handle empty body'. Got: $TITLE"
+            exit 1
+          fi
+
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write    # to add labels; a pull request from a fork gets a read-only token
+    steps:
+      - name: Label by size and by the paths touched
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number,
+            });
+            const lines = pr.additions + pr.deletions;
+            const size = lines < 20 ? 'size/S' : lines < 200 ? 'size/M' : 'size/L';
+            const wanted = new Set([size]);
+            for (const f of files) {
+              if (f.filename.startsWith('docs/') || f.filename.endsWith('.md')) wanted.add('docs');
+              if (f.filename.startsWith('.github/')) wanted.add('ci');
+              if (f.filename.startsWith('src/')) wanted.add('code');
+            }
+            // A pull request can grow; drop an outdated size label before adding the new one.
+            for (const l of pr.labels.map(x => x.name)) {
+              if (l.startsWith('size/') && !wanted.has(l)) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo, issue_number: pr.number, name: l,
+                });
+              }
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: pr.number, labels: [...wanted],
+            });
+            core.summary.addRaw(`${lines} changed lines, labels: ${[...wanted].join(', ')}`).write();
